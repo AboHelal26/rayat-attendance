@@ -1,61 +1,135 @@
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>تسجيل الحضور</title>
-<style>
-body{font-family:Tahoma;padding:20px;text-align:center;}
-h2{margin-top:50px;}
-input{padding:12px;font-size:22px;width:250px;}
-button{padding:12px 25px;font-size:22px;cursor:pointer;}
-#msg{margin-top:20px;font-size:20px;font-weight:bold;}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="referrer" content="no-referrer">
+    <title>تسجيل الحضور</title>
+    <style>
+        * { box-sizing: border-box; }
+        body { font-family: Tahoma, sans-serif; padding: 20px; text-align: center; }
+        main { max-width: 420px; margin: 50px auto 0; }
+        h1 { font-size: 25px; margin-bottom: 28px; }
+        label { display: block; margin-bottom: 10px; }
+        input { padding: 12px; font-size: 22px; width: 100%; text-align: center; }
+        button { padding: 12px 25px; font-size: 22px; cursor: pointer; margin-top: 16px; }
+        button:disabled { cursor: default; opacity: 0.65; }
+        input:focus-visible, button:focus-visible { outline: 3px solid #3f7188; outline-offset: 3px; }
+        #msg { margin-top: 24px; font-size: 18px; font-weight: bold; line-height: 1.8; }
+    </style>
 </head>
 <body>
-<h2>تسجيل الحضور</h2>
-<input id="sid" placeholder="الرقم التدريبي">
-<button onclick="save()">تسجيل</button>
-<div id="msg"></div>
-<script src="js/supabase.js"></script>
-<script>
-const params=new URLSearchParams(window.location.search);
-const sessionId=params.get('session');
+    <main>
+        <h1>تسجيل الحضور</h1>
+        <form id="attendanceForm">
+            <label for="sid">الرقم التدريبي</label>
+            <input id="sid" name="studentId" type="text" inputmode="numeric"
+                autocomplete="off" maxlength="64" placeholder="أدخل الرقم التدريبي"
+                aria-describedby="msg" dir="ltr">
+            <button id="submitBtn" type="submit">تسجيل</button>
+        </form>
+        <div id="msg" role="status" aria-live="polite" aria-atomic="true"></div>
+    </main>
 
-async function save(){
-const studentId=document.getElementById('sid').value.trim();
-if(!studentId){
- document.getElementById('msg').innerHTML='أدخل الرقم التدريبي';
- return;
-}
-try{
- const studentCheck=await fetch(`${SUPABASE_URL}/rest/v1/allowed_students?session_id=eq.${sessionId}&student_id=eq.${studentId}`,{
- headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${SUPABASE_KEY}`}
- });
- const allowedStudent=await studentCheck.json();
- if(allowedStudent.length===0){
-  document.getElementById('msg').innerHTML='❌ الرقم غير موجود في هذه الشعبة';
-  return;
- }
- const checkResponse=await fetch(`${SUPABASE_URL}/rest/v1/attendance_temp?session_id=eq.${sessionId}&student_id=eq.${studentId}`,{
- headers:{apikey:SUPABASE_KEY,Authorization:`Bearer ${SUPABASE_KEY}`}
- });
- const existing=await checkResponse.json();
- if(existing.length>0){
-  document.getElementById('msg').innerHTML='⚠️ تم تسجيل حضورك مسبقاً';
-  return;
- }
- const result=await addAttendance(sessionId,studentId);
- if(result.ok){
-  document.getElementById('msg').innerHTML='✅ تم تسجيل الحضور بنجاح';
- }else{
-  document.getElementById('msg').innerHTML='❌ فشل تسجيل الحضور';
- }
-}catch(error){
- document.getElementById('msg').innerHTML='❌ خطأ في الاتصال';
- console.error(error);
-}
-}
-</script>
+    <script src="js/supabase.js?v=2"></script>
+    <script>
+    (() => {
+        'use strict';
+        const form = document.getElementById('attendanceForm');
+        const input = document.getElementById('sid');
+        const button = document.getElementById('submitBtn');
+        const message = document.getElementById('msg');
+        // Only the separate registration credential from the new QR is accepted.
+        const params = new URLSearchParams(window.location.hash.slice(1));
+        const sessionId = params.get('session') || '';
+        const token = params.get('token') || '';
+        let busy = false;
+
+        function show(text, color = '#333333') {
+            message.textContent = text;
+            message.style.color = color;
+        }
+
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)
+            || !/^[0-9a-f]{64}$/i.test(token)) {
+            button.disabled = true;
+            input.disabled = true;
+            show('رابط الحضور غير صالح أو قديم. امسح رمز QR الخاص بالجلسة الجديدة.', '#a12020');
+            form.addEventListener('submit', event => event.preventDefault());
+            return;
+        }
+
+        if (typeof SUPABASE_URL === 'undefined' || typeof SUPABASE_KEY === 'undefined') {
+            button.disabled = true;
+            show('تعذر تحميل إعدادات التسجيل. حدّث الصفحة أو أعد فتح رمز QR.', '#a12020');
+            form.addEventListener('submit', event => event.preventDefault());
+            return;
+        }
+
+        function normalizeId(value) {
+            return value.trim()
+                .replace(/[\u0660-\u0669]/g, digit => String(digit.charCodeAt(0) - 0x0660))
+                .replace(/[\u06f0-\u06f9]/g, digit => String(digit.charCodeAt(0) - 0x06f0));
+        }
+
+        form.addEventListener('submit', async event => {
+            event.preventDefault();
+            if (busy) return;
+            const studentId = normalizeId(input.value);
+            if (!studentId || studentId.length > 64) {
+                show('أدخل رقمك التدريبي بصورة صحيحة.', '#a12020');
+                input.focus();
+                return;
+            }
+
+            busy = true;
+            button.disabled = true;
+            button.textContent = 'جارٍ التسجيل…';
+            show('جارٍ التحقق من تسجيل الحضور…');
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 20000);
+            try {
+                const response = await fetch(SUPABASE_URL + '/rest/v1/rpc/rayat_secure_register', {
+                    method: 'POST',
+                    headers: {
+                        apikey: SUPABASE_KEY,
+                        Authorization: 'Bearer ' + SUPABASE_KEY,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        p_session_id: sessionId,
+                        p_registration_token: token,
+                        p_student_id: studentId
+                    }),
+                    cache: 'no-store',
+                    referrerPolicy: 'no-referrer',
+                    signal: controller.signal
+                });
+                if (!response.ok) throw new Error('Request failed');
+                const result = await response.json();
+                switch (result && result.status) {
+                    case 'registered':
+                        show('✅ تم تسجيل حضورك بنجاح.', '#17633a');
+                        break;
+                    case 'already_registered':
+                        show('تم تسجيل حضور هذا الرقم مسبقًا في هذه الجلسة.', '#805000');
+                        break;
+                    case 'unavailable':
+                        show('تعذر التسجيل. تأكد من الرقم ورمز QR وأن جلسة الحضور ما زالت مفتوحة.', '#a12020');
+                        break;
+                    default:
+                        throw new Error('Unexpected response');
+                }
+            } catch (error) {
+                show('تعذر تأكيد نتيجة التسجيل بسبب الاتصال. أعد المحاولة؛ لن يتكرر حضورك إذا كان قد سُجّل.', '#a12020');
+            } finally {
+                clearTimeout(timeout);
+                busy = false;
+                button.disabled = false;
+                button.textContent = 'تسجيل';
+            }
+        });
+    })();
+    </script>
 </body>
 </html>
