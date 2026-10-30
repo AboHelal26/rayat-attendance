@@ -4,6 +4,7 @@
 <head>
 
 <meta charset="UTF-8">
+<meta name="referrer" content="no-referrer">
 
 <meta name="viewport"
       content="width=device-width, initial-scale=1.0">
@@ -1375,127 +1376,277 @@ const SUPABASE_KEY =
      ===================================================== -->
 
 <script>
+/* Secure session controller. Rayat parsing/export remain in their original files. */
+(() => {
+    'use strict';
+    const STORAGE_KEY = 'rayatSecureTeacher.v1';
+    const openButton = document.getElementById('openBtn');
+    const finishButton = document.querySelector('.finish-btn');
+    const exportButton = document.querySelector('.export-btn');
+    const fileInput = document.getElementById('excelFile');
+    const info = document.getElementById('sessionInfo');
+    const qr = document.getElementById('qrcode');
+    const count = document.getElementById('attendanceCount');
+    const list = document.getElementById('attendanceList');
+    const originalExport = window.exportAttendanceFile;
+    let state = null;
+    let busy = false;
+    let polling = false;
 
-async function loadAttendance() {
-
-    try {
-
-        const currentSession =
-            localStorage.getItem('sessionId');
-
-
-        if (!currentSession) {
-
-            document.getElementById(
-                'attendanceCount'
-            ).innerHTML =
-                'الحضور الحالي: 0';
-
-
-            document.getElementById(
-                'attendanceList'
-            ).innerHTML =
-                'لا يوجد حضور حتى الآن';
-
-
-            return;
-
-        }
-
-
-        const response =
-            await fetch(
-
-                `${SUPABASE_URL}/rest/v1/attendance_temp?session_id=eq.${encodeURIComponent(currentSession)}`,
-
-                {
-
-                    headers: {
-
-                        apikey:
-                            SUPABASE_KEY,
-
-                        Authorization:
-                            `Bearer ${SUPABASE_KEY}`
-
-                    }
-
-                }
-
-            );
-
-
-        if (!response.ok) {
-
-            return;
-
-        }
-
-
-        const data =
-            await response.json();
-
-
-        /* =============================================
-           العداد
-           ============================================= */
-
-        document.getElementById(
-            'attendanceCount'
-        ).innerHTML =
-            `الحضور الحالي: ${data.length}`;
-
-
-        /* =============================================
-           القائمة
-           ============================================= */
-
-        if (!data.length) {
-
-            document.getElementById(
-                'attendanceList'
-            ).innerHTML =
-                'لا يوجد حضور حتى الآن';
-
-            return;
-
-        }
-
-
-        document.getElementById(
-            'attendanceList'
-        ).innerHTML =
-            data
-                .map(
-                    (student, index) =>
-                        `${index + 1}. ${student.student_id}`
-                )
-                .join('<br>');
-
-
-    } catch (error) {
-
-        console.error(
-            'Attendance update error:',
-            error
-        );
-
+    function persist() {
+        if (state) sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        else sessionStorage.removeItem(STORAGE_KEY);
     }
 
-}
+    function syncControls() {
+        const active = Boolean(state && !state.cleaned);
+        openButton.disabled = busy || active;
+        fileInput.disabled = busy || active;
+        finishButton.disabled = busy || !state || state.cleaned;
+        exportButton.disabled = busy || !state || !state.final;
+    }
 
+    function showAttendees(ids) {
+        count.textContent = 'الحضور الحالي: ' + ids.length;
+        list.textContent = ids.length
+            ? ids.map((id, index) => (index + 1) + '. ' + id).join('\n')
+            : 'لا يوجد حضور حتى الآن';
+        list.style.whiteSpace = 'pre-line';
+    }
 
-/* تحديث كل 3 ثوانٍ */
+    function showSession() {
+        qr.textContent = '';
+        if (!state) {
+            info.textContent = '';
+            showAttendees([]);
+            return;
+        }
+        info.textContent = state.closed
+            ? 'انتهت جلسة الحضور. ' + (state.cleaned
+                ? 'تم تجهيز الملف وتنظيف بيانات الجلسة.'
+                : 'يمكن تحميل الملف؛ اضغط إنهاء الحضور لإعادة محاولة التنظيف.')
+            : 'جلسة الحضور: ' + state.id;
+        if (state.final) showAttendees(state.attendees || []);
+        if (!state.closed && !state.cleaned) {
+            const url = new URL('attendance.html', window.location.href);
+            url.hash = new URLSearchParams({
+                session: state.id, token: state.registrationToken
+            }).toString();
+            new QRCode(qr, url.href);
+        }
+    }
 
-setInterval(
-    loadAttendance,
-    3000
-);
+    async function rpc(name, params) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 20000);
+        try {
+            const response = await fetch(SUPABASE_URL + '/rest/v1/rpc/' + name, {
+                method: 'POST',
+                headers: {
+                    apikey: SUPABASE_KEY,
+                    Authorization: 'Bearer ' + SUPABASE_KEY,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(params),
+                signal: controller.signal,
+                cache: 'no-store',
+                referrerPolicy: 'no-referrer'
+            });
+            if (!response.ok) {
+                throw new Error('تعذر تنفيذ الطلب. تحقق من الاتصال وإعداد الدوال الجديدة.');
+            }
+            return await response.json();
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                throw new Error('انتهت مهلة الاتصال؛ أعد المحاولة.');
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
 
+    function ownerParams() {
+        return {p_session_id: state.id, p_owner_token: state.ownerToken};
+    }
 
-/* تحديث أولي */
+    function validateAttendees(result) {
+        if (!result || !Array.isArray(result.attendees)
+            || !result.attendees.every(id => typeof id === 'string' && id.length <= 64)) {
+            throw new Error('تعذر قراءة نتيجة الحضور؛ لم يتم حذف بيانات الجلسة.');
+        }
+        return [...new Set(result.attendees)];
+    }
 
-loadAttendance();
+    function prepareFinal(ids) {
+        const present = new Set(ids);
+        const idHeader = state.headerMap['Student ID'];
+        const attendanceHeader = state.headerMap['Attendance Indicator'];
+        if (!idHeader || !attendanceHeader) throw new Error('تعذر مطابقة أعمدة ملف رايات.');
+        return state.rows.map(row => ({
+            ...row,
+            [attendanceHeader]: present.has(String(row[idHeader] || '').trim())
+                ? 'Present' : 'Absent'
+        }));
+    }
+
+    function saveExport() {
+        // Export.js reads these keys. Save before acknowledge() can delete server data.
+        localStorage.setItem('finalAttendance', JSON.stringify(state.final));
+        localStorage.setItem('rayatHeaderMap', JSON.stringify(state.headerMap));
+        localStorage.setItem('rayatLanguage', state.language);
+        localStorage.setItem('attendanceFinished', 'true');
+    }
+
+    // Keep each tab's owner credentials and source rows across an accidental refresh.
+    try {
+        const saved = sessionStorage.getItem(STORAGE_KEY);
+        if (saved) {
+            const candidate = JSON.parse(saved);
+            if (!candidate || !/^[0-9a-f-]{36}$/i.test(candidate.id)
+                || !/^[0-9a-f]{64}$/i.test(candidate.ownerToken)
+                || !/^[0-9a-f]{64}$/i.test(candidate.registrationToken)
+                || !Array.isArray(candidate.rows) || !candidate.headerMap) {
+                throw new Error('Invalid stored session');
+            }
+            state = candidate;
+            rayatData = state.rows;
+            rayatHeaderMap = state.headerMap;
+            rayatLanguage = state.language;
+            document.getElementById('fileInfo').textContent =
+                'تم استعادة ملف الجلسة — عدد الصفوف: ' + state.rows.length;
+            if (state.final) saveExport();
+        }
+    } catch (error) {
+        // Never silently discard credentials for an unfinished session.
+        alert('تعذرت استعادة بيانات الجلسة كاملة. أبق هذا التبويب مفتوحًا ولا تمسح بيانات المتصفح.');
+    }
+
+    fileInput.addEventListener('change', event => {
+        if (busy || (state && !state.cleaned)) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+            return;
+        }
+        state = null;
+        try { persist(); } catch (error) { /* No active server session to lose. */ }
+        showSession();
+        syncControls();
+    }, true);
+
+    openButton.onclick = async () => {
+        if (busy || (state && !state.cleaned)) return;
+        if (!rayatData.length) return alert('قم باختيار ملف رايات أولًا.');
+        const rows = JSON.parse(JSON.stringify(rayatData));
+        const headerMap = {...rayatHeaderMap};
+        const ids = [...new Set(rows.map(row =>
+            String(getRayatField(row, 'Student ID') || '').trim()).filter(Boolean))];
+        if (!ids.length) return alert('لا توجد أرقام تدريبية صالحة في الملف.');
+        busy = true;
+        syncControls();
+        try {
+            // Check browser storage before sending roster data to the server.
+            const probe = JSON.stringify({rows, headerMap});
+            sessionStorage.setItem(STORAGE_KEY + '.probe', probe);
+            sessionStorage.removeItem(STORAGE_KEY + '.probe');
+            const result = await rpc('rayat_secure_create', {p_student_ids: ids});
+            if (!result || !/^[0-9a-f-]{36}$/i.test(result.session_id)
+                || !/^[0-9a-f]{64}$/i.test(result.owner_token)
+                || !/^[0-9a-f]{64}$/i.test(result.registration_token)) {
+                throw new Error('تعذر إنشاء جلسة صالحة.');
+            }
+            state = {
+                id: result.session_id, ownerToken: result.owner_token,
+                registrationToken: result.registration_token,
+                rows, headerMap, language: rayatLanguage,
+                final: null, attendees: [], closed: false, cleaned: false
+            };
+            persist();
+            showAttendees([]);
+            showSession();
+        } catch (error) {
+            alert('تعذر فتح الحضور: ' + error.message);
+        } finally {
+            busy = false;
+            syncControls();
+        }
+    };
+
+    window.finishAttendance = async () => {
+        if (busy) return;
+        if (!state) return alert('لا توجد جلسة حضور حالية.');
+        if (state.cleaned) return alert('ملف الحضور جاهز للتحميل.');
+        busy = true;
+        syncControls();
+        try {
+            if (!state.final) {
+                const result = await rpc('rayat_secure_close', ownerParams());
+                const ids = validateAttendees(result);
+                state.closed = true;
+                state.attendees = ids;
+                state.final = prepareFinal(ids);
+            }
+            // close() is idempotent: retrying cannot reopen registration or lose results.
+            persist();
+            saveExport();
+            showSession();
+            const result = await rpc('rayat_secure_acknowledge', ownerParams());
+            if (!result || result.status !== 'deleted') {
+                throw new Error('تعذر تأكيد تنظيف بيانات الجلسة.');
+            }
+            state.cleaned = true;
+            persist();
+            showSession();
+            alert('تم إنهاء الحضور وتجهيز الملف وتنظيف بيانات الجلسة بنجاح.');
+        } catch (error) {
+            alert((state && state.final
+                ? 'الملف جاهز للتحميل، لكن لم يكتمل تأكيد الحفظ والتنظيف: '
+                : 'تعذر إنهاء الحضور: ') + error.message);
+        } finally {
+            busy = false;
+            syncControls();
+        }
+    };
+
+    window.exportAttendanceFile = () => {
+        if (!state || !state.final) return alert('اضغط إنهاء الحضور أولًا.');
+        try {
+            saveExport();
+            originalExport();
+        } catch (error) {
+            alert('تعذر تجهيز التنزيل. أبق الصفحة مفتوحة وتحقق من مساحة تخزين المتصفح.');
+        }
+    };
+
+    async function loadSecureAttendance() {
+        if (polling || busy || !state || state.closed || state.cleaned) return;
+        const current = state;
+        polling = true;
+        try {
+            const result = await rpc('rayat_secure_list', ownerParams());
+            if (current !== state || busy) return;
+            showAttendees(validateAttendees(result));
+            if (!result.closed) info.textContent = 'جلسة الحضور: ' + state.id;
+            if (result.closed) {
+                state.closed = true;
+                persist();
+                showSession();
+            }
+        } catch (error) {
+            // Keep the last successful count visible; never turn a failed read into zero.
+            if (current === state && !busy && !state.closed) {
+                info.textContent = 'تعذر تحديث الحضور مؤقتًا؛ ستتم إعادة المحاولة تلقائيًا.';
+            }
+        } finally {
+            polling = false;
+        }
+    }
+
+    showSession();
+    syncControls();
+    setInterval(loadSecureAttendance, 3000);
+    loadSecureAttendance();
+})();
 
 </script>
 
