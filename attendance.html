@@ -131,5 +131,57 @@
         });
     })();
     </script>
+    <script>
+    (() => {
+        'use strict';
+        if (typeof SUPABASE_URL === 'undefined' || typeof SUPABASE_KEY === 'undefined'
+            || typeof crypto === 'undefined') return;
+
+        let eventId;
+        try {
+            if (typeof crypto.randomUUID === 'function') {
+                eventId = crypto.randomUUID();
+            } else {
+                const bytes = new Uint8Array(16);
+                crypto.getRandomValues(bytes);
+                bytes[6] = (bytes[6] & 15) | 64;
+                bytes[8] = (bytes[8] & 63) | 128;
+                const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+                eventId = hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16)
+                    + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+            }
+        } catch (error) {
+            return;
+        }
+
+        async function recordVisit(attempt = 0) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
+            try {
+                const response = await fetch(SUPABASE_URL + '/rest/v1/rpc/rayat_stats_visit', {
+                    method: 'POST',
+                    headers: {
+                        apikey: SUPABASE_KEY,
+                        Authorization: 'Bearer ' + SUPABASE_KEY,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ p_page: 'attendance', p_event_id: eventId }),
+                    cache: 'no-store',
+                    referrerPolicy: 'no-referrer',
+                    signal: controller.signal
+                });
+                if (!response.ok) throw new Error('Visit request failed');
+                const result = await response.json();
+                if (!result || typeof result.counted !== 'boolean') throw new Error('Unexpected visit response');
+            } catch (error) {
+                if (attempt < 2) setTimeout(() => { void recordVisit(attempt + 1); }, attempt === 0 ? 3000 : 12000);
+            } finally {
+                clearTimeout(timeout);
+            }
+        }
+
+        void recordVisit();
+    })();
+    </script>
 </body>
 </html>
