@@ -1033,6 +1033,39 @@ button:active {
 
 }
 
+/* إحصاءات الاستخدام العامة */
+.site-stats {
+    margin-top: 20px;
+    padding: 16px 20px;
+    border: 1px solid #dce6ea;
+    border-radius: 18px;
+    background: #ffffff;
+    text-align: center;
+}
+.site-stats-visits {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: #3f7188;
+}
+.site-stats-visits strong { margin-inline-start: 6px; font-size: 19px; }
+.site-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+}
+.site-stats-card { padding: 10px 6px; border-radius: 12px; background: #f3f8fa; }
+.site-stats-value { display: block; font-size: 23px; font-weight: bold; color: #3f7188; }
+.site-stats-label { display: block; margin-top: 5px; font-size: 12px; line-height: 1.7; color: #4d606a; }
+.site-stats-note { margin: 10px 0 0; font-size: 11px; line-height: 1.8; color: #667780; }
+.site-stats-status { margin: 4px 0 0; font-size: 11px; color: #667780; }
+.site-stats-status:empty { display: none; }
+@media (max-width: 480px) {
+    .site-stats { padding: 14px 10px; }
+    .site-stats-grid { gap: 6px; }
+    .site-stats-label { font-size: 11px; }
+    .site-stats-value { font-size: 20px; }
+}
+
 </style>
 
 </head>
@@ -1260,6 +1293,27 @@ button:active {
         </div>
 
     </main>
+
+    <section class="site-stats" aria-label="إحصاءات استخدام النظام">
+        <p class="site-stats-visits">إجمالي زيارات الموقع: <strong id="statsMainVisits">—</strong></p>
+        <div class="site-stats-grid">
+            <div class="site-stats-card">
+                <span class="site-stats-value" id="statsSessions">—</span>
+                <span class="site-stats-label">جلسات الحضور</span>
+            </div>
+            <div class="site-stats-card">
+                <span class="site-stats-value" id="statsRegistrations">—</span>
+                <span class="site-stats-label">تسجيلات الحضور الناجحة</span>
+            </div>
+            <div class="site-stats-card">
+                <span class="site-stats-value" id="statsStudentVisits">—</span>
+                <span class="site-stats-label">زيارات صفحة تسجيل الحضور</span>
+            </div>
+        </div>
+        <p class="site-stats-note"><span id="statsSince"></span><br>الزيارات تمثل مرات فتح الصفحات، وقد تتكرر للشخص نفسه.</p>
+        <p class="site-stats-status" id="statsStatus" role="status">جارٍ تحميل الإحصاءات…</p>
+    </section>
+
 
 
 
@@ -1650,6 +1704,113 @@ const SUPABASE_KEY =
 
 </script>
 
+
+<script>
+/* Public aggregate statistics; one visit event per page load. */
+(() => {
+    'use strict';
+    const fields = {
+        main_visits: document.getElementById('statsMainVisits'),
+        sessions_opened: document.getElementById('statsSessions'),
+        successful_registrations: document.getElementById('statsRegistrations'),
+        student_page_visits: document.getElementById('statsStudentVisits')
+    };
+    const status = document.getElementById('statsStatus');
+    const since = document.getElementById('statsSince');
+    const numberFormat = new Intl.NumberFormat('ar-SA');
+    const dateFormat = new Intl.DateTimeFormat('ar-SA-u-ca-gregory', {
+        year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Riyadh'
+    });
+    let loading = false;
+    let refreshAgain = false;
+
+    async function statsRpc(name, params) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        try {
+            const response = await fetch(SUPABASE_URL + '/rest/v1/rpc/' + name, {
+                method: 'POST',
+                headers: {
+                    apikey: SUPABASE_KEY,
+                    Authorization: 'Bearer ' + SUPABASE_KEY,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(params),
+                signal: controller.signal,
+                cache: 'no-store',
+                referrerPolicy: 'no-referrer'
+            });
+            if (!response.ok) throw new Error('Statistics unavailable');
+            return await response.json();
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+
+    async function refreshSummary() {
+        if (loading) { refreshAgain = true; return; }
+        loading = true;
+        try {
+            const summary = await statsRpc('rayat_stats_summary', {});
+            const display = {};
+            for (const key of Object.keys(fields)) {
+                const value = summary && summary[key];
+                if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid statistics');
+                display[key] = numberFormat.format(value);
+            }
+            if (!summary.started_at) throw new Error('Missing start date');
+            const date = new Date(summary.started_at);
+            if (!Number.isFinite(date.getTime())) throw new Error('Invalid start date');
+            const dateLabel = dateFormat.format(date);
+            // Update together only after the whole response is validated.
+            for (const key of Object.keys(fields)) fields[key].textContent = display[key];
+            since.textContent = 'الإحصاءات منذ: ' + dateLabel;
+            status.textContent = '';
+        } catch (error) {
+            // Preserve the last confirmed values; a failed read is never a zero.
+            status.textContent = 'تعذر تحديث الإحصاءات مؤقتًا.';
+        } finally {
+            loading = false;
+            if (refreshAgain) {
+                refreshAgain = false;
+                refreshSummary();
+            }
+        }
+    }
+
+    function createVisitId() {
+        if (typeof window.crypto?.randomUUID === 'function') return window.crypto.randomUUID();
+        if (typeof window.crypto?.getRandomValues !== 'function') return null;
+        const bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 15) | 64;
+        bytes[8] = (bytes[8] & 63) | 128;
+        const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        return hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16)
+            + '-' + hex.slice(16, 20) + '-' + hex.slice(20);
+    }
+
+    // Created once and kept only in this page's memory; retries reuse the same UUID.
+    const visitId = createVisitId();
+    async function recordVisit(attempt = 0) {
+        if (!visitId) return;
+        try {
+            const result = await statsRpc('rayat_stats_visit', {
+                p_page: 'main', p_event_id: visitId
+            });
+            if (!result || typeof result.counted !== 'boolean') throw new Error('Invalid receipt');
+            refreshSummary();
+        } catch (error) {
+            if (attempt < 2) setTimeout(() => recordVisit(attempt + 1), attempt ? 12000 : 3000);
+        }
+    }
+
+    refreshSummary();
+    recordVisit();
+    setInterval(() => { if (!document.hidden) refreshSummary(); }, 30000);
+})();
+
+</script>
 
 </body>
 
