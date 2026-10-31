@@ -1056,7 +1056,6 @@ button:active {
 .site-stats-card { padding: 10px 6px; border-radius: 12px; background: #f3f8fa; }
 .site-stats-value { display: block; font-size: 23px; font-weight: bold; color: #3f7188; }
 .site-stats-label { display: block; margin-top: 5px; font-size: 12px; line-height: 1.7; color: #4d606a; }
-.site-stats-note { margin: 10px 0 0; font-size: 11px; line-height: 1.8; color: #667780; }
 .site-stats-status { margin: 4px 0 0; font-size: 11px; color: #667780; }
 .site-stats-status:empty { display: none; }
 @media (max-width: 480px) {
@@ -1310,7 +1309,6 @@ button:active {
                 <span class="site-stats-label">زيارات صفحة تسجيل الحضور</span>
             </div>
         </div>
-        <p class="site-stats-note"><span id="statsSince"></span><br>الزيارات تمثل مرات فتح الصفحات، وقد تتكرر للشخص نفسه.</p>
         <p class="site-stats-status" id="statsStatus" role="status">جارٍ تحميل الإحصاءات…</p>
     </section>
 
@@ -1716,11 +1714,7 @@ const SUPABASE_KEY =
         student_page_visits: document.getElementById('statsStudentVisits')
     };
     const status = document.getElementById('statsStatus');
-    const since = document.getElementById('statsSince');
     const numberFormat = new Intl.NumberFormat('ar-SA');
-    const dateFormat = new Intl.DateTimeFormat('ar-SA-u-ca-gregory', {
-        year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'Asia/Riyadh'
-    });
     let loading = false;
     let refreshAgain = false;
 
@@ -1758,13 +1752,8 @@ const SUPABASE_KEY =
                 if (!Number.isSafeInteger(value) || value < 0) throw new Error('Invalid statistics');
                 display[key] = numberFormat.format(value);
             }
-            if (!summary.started_at) throw new Error('Missing start date');
-            const date = new Date(summary.started_at);
-            if (!Number.isFinite(date.getTime())) throw new Error('Invalid start date');
-            const dateLabel = dateFormat.format(date);
             // Update together only after the whole response is validated.
             for (const key of Object.keys(fields)) fields[key].textContent = display[key];
-            since.textContent = 'الإحصاءات منذ: ' + dateLabel;
             status.textContent = '';
         } catch (error) {
             // Preserve the last confirmed values; a failed read is never a zero.
